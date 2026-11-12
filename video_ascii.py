@@ -13,21 +13,35 @@ Controls:
     Home / End       start / end
     0-9              jump to 0%, 10%, ... 90%
     Space            pause / resume
+    + / -            volume up / down
+    m                mute / unmute
     q / Esc          quit
 
 Dependencies: numpy, opencv-python (video decoding).
+Optional, for sound: av (PyAV), sounddevice.
 The terminal must support 24-bit color (Windows Terminal, iTerm2, most
 modern Linux terminals).
 """
 
 import argparse
 import os
+import queue
 import shutil
 import sys
+import threading
 import time
 
 import cv2
 import numpy as np
+
+try:  # optional: audio playback
+    import av
+    import sounddevice as sd
+except ImportError:
+    av = sd = None
+
+AUDIO_RATE = 48000
+AUDIO_CHANNELS = 2
 
 # Ramp from darkest to brightest.
 DEFAULT_RAMP = " .:-=+*#%@"
@@ -218,9 +232,188 @@ class Keyboard:
         return ch.lower()
 
 
+# --- Audio -----------------------------------------------------------------
+class AudioPlayer:
+    """Decodes the audio track in a background thread and plays it.
+
+    Also serves as the master clock: the video follows `time()`, so picture
+    and sound stay in sync even when rendering is slow.
+    """
+
+    def __init__(self, path, volume=1.0, muted=False):
+        self.container = av.open(path)
+        self.stream = self.container.streams.audio[0]  # IndexError: no audio track
+        self.stream.thread_type = "AUTO"
+        # Frame 0 of the video is at the video stream's start time.
+        vs = self.container.streams.video
+        start = vs[0].start_time if vs else None
+        self.offset = float(start * vs[0].time_base) if start is not None else 0.0
+
+        self.volume, self.muted = volume, muted
+        self.queue = queue.Queue(maxsize=128)  # (generation, pts, samples)
+        self.lock = threading.Lock()
+        self.gen = 0               # bumped on each seek; stale chunks are dropped
+        self.seek_req = 0.0
+        self.paused = False
+        self.stopping = False
+        self._cur = None           # [gen, pts, samples, offset] being played
+        self._anchor(0.0)
+
+        self.out = sd.OutputStream(samplerate=AUDIO_RATE, channels=AUDIO_CHANNELS,
+                                   dtype="float32", callback=self._callback)
+        self.latency = float(self.out.latency)
+        self.thread = threading.Thread(target=self._decode_loop, daemon=True)
+        self.thread.start()
+        self.out.start()
+
+    # -- clock --
+    def _anchor(self, t):
+        self.seek_target = t
+        self.seek_wall = time.perf_counter()
+        self.started = False
+        self.frozen = t
+        self._cb = (t, self.seek_wall)  # (pts of last block, wall time it was sent)
+
+    def time(self):
+        if self.paused:
+            return self.frozen
+        now = time.perf_counter()
+        if not self.started:
+            # Wait for the first samples; give up after 1 s and run on the wall clock.
+            return self.seek_target + max(0.0, now - self.seek_wall - 1.0)
+        pts, wall = self._cb
+        return max(self.seek_target, pts + (now - wall) - self.latency)
+
+    # -- controls --
+    def seek(self, t):
+        with self.lock:
+            self.gen += 1
+            self.seek_req = max(0.0, t)
+            self._cur = None
+            self._anchor(max(0.0, t))
+        try:
+            while True:
+                self.queue.get_nowait()
+        except queue.Empty:
+            pass
+
+    def pause(self):
+        if not self.paused:
+            self.frozen = self.time()
+            self.paused = True
+
+    def resume(self):
+        if self.paused:
+            with self.lock:
+                self._anchor(self.frozen)
+            self.paused = False
+
+    def close(self):
+        self.stopping = True
+        try:
+            self.out.stop()
+            self.out.close()
+        except Exception:
+            pass
+        self.thread.join(timeout=1.0)
+        self.container.close()
+
+    # -- sound card callback (audio thread) --
+    def _callback(self, outdata, frames, time_info, status):
+        if self.paused:
+            outdata.fill(0)
+            return
+        gen = self.gen
+        filled, first_pts = 0, None
+        while filled < frames:
+            cur = self._cur
+            if cur is None or cur[0] != gen:
+                try:
+                    g, pts, data = self.queue.get_nowait()
+                except queue.Empty:
+                    break  # underrun: pad with silence
+                if g != gen:
+                    continue
+                cur = self._cur = [g, pts, data, 0]
+            _, pts, data, off = cur
+            n = min(frames - filled, len(data) - off)
+            if first_pts is None:
+                first_pts = pts + off / AUDIO_RATE
+            outdata[filled:filled + n] = data[off:off + n]
+            filled += n
+            cur[3] = off + n
+            if cur[3] >= len(data):
+                self._cur = None
+        outdata[filled:].fill(0)
+
+        vol = 0.0 if self.muted else self.volume
+        if vol != 1.0:
+            np.multiply(outdata, vol, out=outdata)
+            np.clip(outdata, -1.0, 1.0, out=outdata)
+        if first_pts is not None and gen == self.gen:
+            self._cb = (first_pts, time.perf_counter())
+            self.started = True
+
+    # -- decoder (background thread) --
+    def _decode_loop(self):
+        tb = self.stream.time_base
+        demux = resampler = None
+        target, next_pts, gen, eof = 0.0, None, 0, False
+        while not self.stopping:
+            with self.lock:
+                req, self.seek_req = self.seek_req, None
+                cur_gen = self.gen
+            if req is not None:
+                gen, target, next_pts, eof = cur_gen, req, None, False
+                try:
+                    self.container.seek(int((req + self.offset) / tb), stream=self.stream)
+                except Exception:
+                    pass
+                demux = self.container.demux(self.stream)
+                resampler = av.AudioResampler(format="flt", layout="stereo", rate=AUDIO_RATE)
+            if eof or demux is None:
+                time.sleep(0.02)
+                continue
+            try:
+                packet = next(demux)
+                frames = packet.decode()
+            except StopIteration:
+                eof = True
+                continue
+            except Exception:
+                continue  # corrupt packet: skip it
+
+            for frame in frames:
+                if gen != self.gen:
+                    break
+                if next_pts is None:
+                    if frame.time is None:
+                        continue
+                    next_pts = frame.time - self.offset
+                for out in resampler.resample(frame):
+                    data = out.to_ndarray().reshape(-1, AUDIO_CHANNELS)
+                    pts = next_pts
+                    next_pts += len(data) / AUDIO_RATE
+                    if next_pts <= target:
+                        continue  # before the seek target
+                    if pts < target:
+                        data = data[int((target - pts) * AUDIO_RATE):]
+                        pts = target
+                    self._put((gen, pts, np.ascontiguousarray(data, dtype=np.float32)))
+
+    def _put(self, item):
+        while not self.stopping and item[0] == self.gen:
+            try:
+                self.queue.put(item, timeout=0.05)
+                return
+            except queue.Full:
+                continue
+
+
 # --- Player ----------------------------------------------------------------
 class Player:
-    def __init__(self, path, ramp_str, width, loop, quant, boost):
+    def __init__(self, path, ramp_str, width, loop, quant, boost,
+                 audio=True, volume=1.0, muted=False):
         self.cap = cv2.VideoCapture(path)
         if not self.cap.isOpened():
             sys.exit(f"Cannot open video: {path}")
@@ -244,7 +437,25 @@ class Player:
         self.real_fps = 0.0
         self._fps_t0, self._fps_n = time.perf_counter(), 0
 
+        self.audio, self.audio_note = None, "no audio"
+        if not audio:
+            self.audio_note = "audio off"
+        elif av is None:
+            self.audio_note = "no audio (pip install av sounddevice)"
+        else:
+            try:
+                self.audio = AudioPlayer(path, volume, muted)
+            except IndexError:
+                self.audio_note = "no audio track"
+            except Exception as e:
+                self.audio_note = f"audio error: {e}"
+
     # -- timing / seeking --
+    def clock(self):
+        """Current media time in seconds (audio clock when there is sound)."""
+        if self.audio:
+            return self.audio.time()
+        return time.perf_counter() - self.t0
     @property
     def duration(self):
         return self.total / self.fps if self.total else 0.0
@@ -261,6 +472,8 @@ class Player:
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, target)
         self.pos = target
         self.resync()
+        if self.audio:
+            self.audio.seek(target / self.fps)
         self.show_next()  # show the new position right away, even when paused
 
     def seek_seconds(self, delta):
@@ -271,8 +484,23 @@ class Player:
             return False
         if key == "space":
             self.paused = not self.paused
-            if not self.paused:
+            if self.paused:
+                if self.audio:
+                    self.audio.pause()
+            else:
                 self.resync()
+                if self.audio:
+                    self.audio.resume()
+            self.render()
+        elif key in ("+", "=") and self.audio:
+            self.audio.volume = min(2.0, round(self.audio.volume + 0.1, 2))
+            self.audio.muted = False
+            self.render()
+        elif key == "-" and self.audio:
+            self.audio.volume = max(0.0, round(self.audio.volume - 0.1, 2))
+            self.render()
+        elif key == "m" and self.audio:
+            self.audio.muted = not self.audio.muted
             self.render()
         elif key == "left":
             self.seek_seconds(-10)
@@ -337,8 +565,13 @@ class Player:
         frac = (self.pos - 1) / max(1, self.total - 1) if self.total else 0.0
         bar_line = f" {icon}[{progress_bar(frac, bar_w)}\x1b[0m]{times}"
 
+        if self.audio:
+            sound = "muted" if self.audio.muted else f"vol {self.audio.volume:.0%}"
+        else:
+            sound = self.audio_note
         status = (f" {self.name}  ·  {cols}x{rows}  ·  {self.real_fps:4.1f}/{self.fps:.0f} fps"
-                  f"  ·  ←→ 10s  ↑↓ 1min  PgUp/PgDn 10min  0-9 jump  Space pause  q quit")
+                  f"  ·  {sound}  ·  ←→ 10s  ↑↓ 1min  PgUp/PgDn 10min  0-9 jump"
+                  f"  Space pause  +/- vol  m mute  q quit")
         status = status[: term.columns - 1]
 
         out.append(b"\x1b[%d;1H\x1b[2K" % (term.lines - 1) + bar_line.encode("utf-8"))
@@ -367,8 +600,15 @@ class Player:
                         time.sleep(0.03)
                         continue
 
+                    # Next frame not due yet: wait a little (keeps keys responsive).
+                    now = self.clock()
+                    wait = self.pos * self.frame_time - now
+                    if wait > 0:
+                        time.sleep(min(wait, 0.02))
+                        continue
+
                     # Behind schedule? Skip frames without decoding them.
-                    due = int((time.perf_counter() - self.t0) / self.frame_time)
+                    due = int(now / self.frame_time)
                     while self.pos < due - 1 and self.cap.grab():
                         self.pos += 1
 
@@ -377,13 +617,11 @@ class Player:
                             self.seek_frame(0)
                             continue
                         break
-
-                    delay = self.t0 + self.pos * self.frame_time - time.perf_counter()
-                    if delay > 0:
-                        time.sleep(delay)
         except KeyboardInterrupt:
             pass
         finally:
+            if self.audio:
+                self.audio.close()
             self.cap.release()
             self.out.write(b"\x1b[0m\x1b[?25h\x1b[?1049l")
             self.out.flush()
@@ -393,7 +631,7 @@ def main():
     p = argparse.ArgumentParser(
         description="Colored ASCII video player for the terminal.",
         epilog="Controls: Left/Right -/+10s, Up/Down +/-1min, PgUp/PgDn +/-10min, "
-               "Home/End, 0-9 jump to 0-90%%, Space pause, q/Esc quit.")
+               "Home/End, 0-9 jump to 0-90%%, Space pause, +/- volume, m mute, q/Esc quit.")
     p.add_argument("path", help="path to the video")
     p.add_argument("--chars", default=DEFAULT_RAMP,
                    help='characters from darkest to brightest (default: "%(default)s"). '
@@ -404,6 +642,9 @@ def main():
                    help="color quantization step (1 = none, default 4)")
     p.add_argument("--boost", type=float, default=None,
                    help="color brightness multiplier (default: 1.0, or 1.4 with a single character)")
+    p.add_argument("--volume", type=int, default=100, help="initial volume in %% (0-200, default 100)")
+    p.add_argument("--mute", action="store_true", help="start muted")
+    p.add_argument("--no-audio", action="store_true", help="do not play sound at all")
     a = p.parse_args()
 
     if not os.path.isfile(a.path):
@@ -411,7 +652,9 @@ def main():
     if not a.chars or not a.chars.isascii():
         sys.exit("--chars must contain at least one ASCII character")
     boost = a.boost if a.boost is not None else (1.4 if len(a.chars) == 1 else 1.0)
-    Player(a.path, a.chars, a.width, a.loop, max(1, a.quant), boost).run()
+    Player(a.path, a.chars, a.width, a.loop, max(1, a.quant), boost,
+           audio=not a.no_audio, volume=min(max(a.volume, 0), 200) / 100,
+           muted=a.mute).run()
 
 
 if __name__ == "__main__":
