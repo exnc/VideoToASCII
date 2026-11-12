@@ -34,11 +34,16 @@ import time
 import cv2
 import numpy as np
 
+AUDIO_UNAVAILABLE = None
 try:  # optional: audio playback
     import av
     import sounddevice as sd
 except ImportError:
     av = sd = None
+    AUDIO_UNAVAILABLE = "no audio (pip install av sounddevice)"
+except OSError:  # sounddevice installed, but the PortAudio library is missing
+    av = sd = None
+    AUDIO_UNAVAILABLE = "no audio (PortAudio missing: apt install libportaudio2)"
 
 AUDIO_RATE = 48000
 AUDIO_CHANNELS = 2
@@ -440,8 +445,8 @@ class Player:
         self.audio, self.audio_note = None, "no audio"
         if not audio:
             self.audio_note = "audio off"
-        elif av is None:
-            self.audio_note = "no audio (pip install av sounddevice)"
+        elif AUDIO_UNAVAILABLE:
+            self.audio_note = AUDIO_UNAVAILABLE
         else:
             try:
                 self.audio = AudioPlayer(path, volume, muted)
