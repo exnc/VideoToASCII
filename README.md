@@ -22,9 +22,26 @@ Play any video in full color, as ASCII art, directly in your terminal, with sync
 - Python 3.10+
 - A terminal with 24-bit color support (Windows Terminal, iTerm2, most modern Linux terminals)
 
+### Windows / macOS
+
 ```bash
 pip install -r requirements.txt
 ```
+
+### Linux (Debian, Ubuntu, WSL)
+
+Recent distributions block `pip install` into the system Python ([PEP 668](https://peps.python.org/pep-0668/)), so use a virtual environment:
+
+```bash
+sudo apt install python3-venv libportaudio2
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Run `source .venv/bin/activate` again in each new terminal before starting the player. `libportaudio2` is the system library `sounddevice` needs for audio output; without it, the video plays without sound.
+
+### Dependencies
 
 | Package | Purpose |
 |---|---|
