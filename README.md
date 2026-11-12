@@ -6,7 +6,7 @@ Play any video in full color, as ASCII art, directly in your terminal, with sync
 > **This project was written entirely by Claude, Anthropic's AI model.** No line of code in this repository was written by hand.
 > It is an experimental demo with no particular purpose: it is not maintained, offers no guarantees and is not meant for production use.
 
-![VideoToASCII playing a movie in Windows Terminal](demo-minecraft-movie.png)
+![VideoToASCII playing a movie in Windows Terminal](docs/demo-minecraft-movie.png)
 
 ## Features
 

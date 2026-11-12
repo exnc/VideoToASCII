@@ -1,0 +1,545 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VideoToASCII</title>
+  <meta name="description" content="Play any video in full color, as ASCII art, directly in your terminal, with synchronized sound, a progress bar and keyboard seeking.">
+  <meta name="color-scheme" content="dark light">
+  <meta property="og:title" content="VideoToASCII">
+  <meta property="og:description" content="Play any video in full color, as ASCII art, directly in your terminal.">
+  <meta property="og:image" content="demo-minecraft-movie.png">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23066fd1'/%3E%3Ctext x='16' y='22' font-family='monospace' font-size='16' font-weight='700' fill='white' text-anchor='middle'%3E%23%3C/text%3E%3C/svg%3E">
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/css/tabler.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.34.1/dist/tabler-icons.min.css">
+
+  <style>
+    :root {
+      --tblr-font-sans-serif: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      --tblr-font-monospace: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    html { scroll-behavior: smooth; scroll-padding-top: 5rem; }
+    .navbar { position: sticky; top: 0; z-index: 1030; }
+    .navbar-brand-mark {
+      display: inline-grid; place-items: center; width: 2rem; height: 2rem; border-radius: .5rem;
+      background: var(--tblr-primary); color: #fff; font-family: var(--tblr-font-monospace); font-weight: 700;
+    }
+
+    /* Hero */
+    .hero {
+      background:
+        radial-gradient(60rem 30rem at 0% 0%, rgba(var(--tblr-primary-rgb), .18), transparent 60%),
+        var(--tblr-bg-surface);
+      overflow: hidden;
+    }
+    .hero-title { font-size: clamp(2rem, 5vw, 3.25rem); font-weight: 700; letter-spacing: -.02em; line-height: 1.1; }
+    .hero-title .ascii { font-family: var(--tblr-font-monospace); color: var(--tblr-primary); }
+    .plasma-wrap {
+      background: #0b0b0c; border-radius: var(--tblr-border-radius-lg);
+      border: 1px solid rgba(255,255,255,.08); box-shadow: 0 1rem 3rem rgba(0,0,0,.35);
+    }
+    .plasma-bar { display: flex; gap: .4rem; padding: .6rem .8rem; border-bottom: 1px solid rgba(255,255,255,.06); }
+    .plasma-bar span { width: .65rem; height: .65rem; border-radius: 50%; background: #3a3a3e; }
+    .plasma-bar span:nth-child(1) { background: #ff5f57; }
+    .plasma-bar span:nth-child(2) { background: #febc2e; }
+    .plasma-bar span:nth-child(3) { background: #28c840; }
+    #plasma {
+      margin: 0; padding: .75rem .9rem; background: transparent; border: 0;
+      font-family: var(--tblr-font-monospace); font-size: clamp(6px, 1.05vw, 11px); line-height: 1.15;
+      white-space: pre; overflow: hidden; color: #888;
+    }
+    .plasma-status {
+      font-family: var(--tblr-font-monospace); font-size: .72rem; color: #8a8a90;
+      padding: 0 .9rem .7rem; display: flex; align-items: center; gap: .5rem;
+    }
+    .plasma-status .bar { flex: 1; height: .45rem; border-radius: 1rem; background: #2a2a2e; overflow: hidden; }
+    .plasma-status .bar i { display: block; height: 100%; width: 0; background: #e6b450; }
+
+    /* Code */
+    .code-block { position: relative; }
+    .code-block pre {
+      margin: 0; padding: 1rem 3.25rem 1rem 1rem; border-radius: var(--tblr-border-radius);
+      background: #0b0b0c; color: #e6e6e6; font-size: .85rem; border: 1px solid var(--tblr-border-color);
+    }
+    .code-block pre .c { color: #6c7280; }
+    .code-block .btn-copy { position: absolute; top: .5rem; right: .5rem; }
+    kbd { font-family: var(--tblr-font-monospace); }
+    .key-cell kbd + kbd { margin-left: .25rem; }
+
+    .demo-img { display: block; width: 100%; height: auto; border-radius: 0 0 var(--tblr-border-radius-lg) var(--tblr-border-radius-lg); }
+    .section-title { font-size: 1.35rem; font-weight: 600; }
+    .feature-card .avatar { --tblr-avatar-size: 2.75rem; font-size: 1.35rem; }
+    .stat-value { font-size: 1.6rem; font-weight: 700; letter-spacing: -.01em; }
+    .table code { white-space: nowrap; }
+    footer a { color: inherit; }
+  </style>
+  <script>
+    // Apply the saved or system theme before first paint.
+    (function () {
+      var t = null;
+      try { t = localStorage.getItem("vta-theme"); } catch (e) {}
+      if (!t) t = window.matchMedia && matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+      document.documentElement.setAttribute("data-bs-theme", t);
+    })();
+  </script>
+</head>
+<body>
+<div class="page">
+
+  <!-- Navbar -->
+  <header class="navbar navbar-expand-md d-print-none">
+    <div class="container-xl">
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar-menu" aria-controls="navbar-menu" aria-expanded="false" aria-label="Toggle navigation">
+        <span class="navbar-toggler-icon"></span>
+      </button>
+      <a href="#" class="navbar-brand navbar-brand-autodark pe-0 pe-md-3 d-flex align-items-center gap-2 text-reset">
+        <span class="navbar-brand-mark">#</span>
+        <span class="fw-bold">VideoToASCII</span>
+      </a>
+      <div class="navbar-nav flex-row order-md-last align-items-center gap-1">
+        <button type="button" class="nav-link px-2" id="theme-toggle" title="Toggle theme" aria-label="Toggle theme">
+          <i class="ti ti-sun fs-2 theme-icon-light"></i>
+          <i class="ti ti-moon fs-2 theme-icon-dark"></i>
+        </button>
+        <a href="https://github.com/exnc/VideoToASCII" class="btn btn-primary d-none d-sm-inline-flex" target="_blank" rel="noopener">
+          <i class="ti ti-brand-github icon"></i> GitHub
+        </a>
+      </div>
+      <div class="collapse navbar-collapse" id="navbar-menu">
+        <ul class="navbar-nav">
+          <li class="nav-item"><a class="nav-link" href="#features"><span class="nav-link-icon"><i class="ti ti-sparkles"></i></span><span class="nav-link-title">Features</span></a></li>
+          <li class="nav-item"><a class="nav-link" href="#install"><span class="nav-link-icon"><i class="ti ti-download"></i></span><span class="nav-link-title">Install</span></a></li>
+          <li class="nav-item"><a class="nav-link" href="#usage"><span class="nav-link-icon"><i class="ti ti-terminal-2"></i></span><span class="nav-link-title">Usage</span></a></li>
+          <li class="nav-item"><a class="nav-link" href="#controls"><span class="nav-link-icon"><i class="ti ti-keyboard"></i></span><span class="nav-link-title">Controls</span></a></li>
+          <li class="nav-item"><a class="nav-link" href="#tips"><span class="nav-link-icon"><i class="ti ti-bulb"></i></span><span class="nav-link-title">Tips</span></a></li>
+        </ul>
+      </div>
+    </div>
+  </header>
+
+  <div class="page-wrapper">
+    <div class="page-body">
+      <div class="container-xl">
+
+        <!-- Hero -->
+        <div class="card hero mb-4">
+          <div class="card-body p-4 p-lg-5">
+            <div class="row g-5 align-items-center">
+              <div class="col-lg-6">
+                <div class="text-secondary text-uppercase fw-semibold small mb-2" style="letter-spacing:.08em">Terminal video player</div>
+                <h1 class="hero-title mb-3">Watch any video as <span class="ascii">ASCII&nbsp;art</span>, in full color.</h1>
+                <p class="text-secondary fs-3 mb-4">
+                  VideoToASCII plays a video directly in your terminal with 24-bit color,
+                  synchronized sound, a progress bar and keyboard seeking.
+                </p>
+                <div class="btn-list">
+                  <a href="#install" class="btn btn-primary btn-lg"><i class="ti ti-rocket icon"></i> Get started</a>
+                  <a href="https://github.com/exnc/VideoToASCII" class="btn btn-lg" target="_blank" rel="noopener"><i class="ti ti-brand-github icon"></i> View source</a>
+                </div>
+              </div>
+              <div class="col-lg-6">
+                <div class="plasma-wrap" aria-hidden="true">
+                  <div class="plasma-bar"><span></span><span></span><span></span></div>
+                  <pre id="plasma"></pre>
+                  <div class="plasma-status"><span id="plasma-icon">▶</span><span class="bar"><i id="plasma-progress"></i></span><span id="plasma-time">00:00</span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Notice -->
+        <div class="alert alert-important alert-warning mb-4" role="alert">
+          <div class="d-flex gap-3">
+            <div><i class="ti ti-robot fs-1"></i></div>
+            <div>
+              <h4 class="alert-title mb-1">Written entirely by Claude, Anthropic's AI model</h4>
+              <div>
+                No line of code in this repository was written by hand. This is an experimental demo with no
+                particular purpose: it is not maintained, offers no guarantees and is not meant for production use.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Stats -->
+        <div class="row row-cards mb-4">
+          <div class="col-6 col-lg-3">
+            <div class="card card-sm"><div class="card-body d-flex align-items-center gap-3">
+              <span class="avatar bg-primary text-white"><i class="ti ti-palette fs-2"></i></span>
+              <div><div class="stat-value">24-bit</div><div class="text-secondary">True color output</div></div>
+            </div></div>
+          </div>
+          <div class="col-6 col-lg-3">
+            <div class="card card-sm"><div class="card-body d-flex align-items-center gap-3">
+              <span class="avatar bg-green text-white"><i class="ti ti-volume fs-2"></i></span>
+              <div><div class="stat-value">In sync</div><div class="text-secondary">Audio-driven clock</div></div>
+            </div></div>
+          </div>
+          <div class="col-6 col-lg-3">
+            <div class="card card-sm"><div class="card-body d-flex align-items-center gap-3">
+              <span class="avatar bg-orange text-white"><i class="ti ti-bolt fs-2"></i></span>
+              <div><div class="stat-value">~2 ms</div><div class="text-secondary">To encode a frame</div></div>
+            </div></div>
+          </div>
+          <div class="col-6 col-lg-3">
+            <div class="card card-sm"><div class="card-body d-flex align-items-center gap-3">
+              <span class="avatar bg-purple text-white"><i class="ti ti-file-code fs-2"></i></span>
+              <div><div class="stat-value">1 file</div><div class="text-secondary">Pure Python script</div></div>
+            </div></div>
+          </div>
+        </div>
+
+        <!-- Demo -->
+        <div class="card mb-5">
+          <div class="card-header">
+            <h3 class="card-title"><i class="ti ti-photo me-2 text-secondary"></i>Demo</h3>
+            <div class="card-actions text-secondary small">A movie playing in Windows Terminal, paused at 00:38:53</div>
+          </div>
+          <img class="demo-img" src="demo-minecraft-movie.png" width="2560" height="1368" loading="lazy"
+               alt="VideoToASCII playing a movie in Windows Terminal, with the progress bar and status line at the bottom">
+        </div>
+
+        <!-- Features -->
+        <section id="features" class="mb-5">
+          <div class="mb-3">
+            <h2 class="section-title mb-1">Features</h2>
+            <div class="text-secondary">Everything you need to watch a movie in a terminal, in a single script.</div>
+          </div>
+          <div class="row row-cards">
+            <div class="col-md-6 col-lg-4">
+              <div class="card feature-card h-100"><div class="card-body">
+                <span class="avatar bg-primary-lt mb-3"><i class="ti ti-palette"></i></span>
+                <h3 class="card-title mb-1">24-bit color</h3>
+                <p class="text-secondary mb-0">Each character keeps the exact color of the pixels it replaces, chosen by brightness from <code> .:-=+*#%@</code>.</p>
+              </div></div>
+            </div>
+            <div class="col-md-6 col-lg-4">
+              <div class="card feature-card h-100"><div class="card-body">
+                <span class="avatar bg-green-lt mb-3"><i class="ti ti-music"></i></span>
+                <h3 class="card-title mb-1">Synchronized audio</h3>
+                <p class="text-secondary mb-0">The video follows the audio clock and drops frames when rendering falls behind, so picture and sound never drift.</p>
+              </div></div>
+            </div>
+            <div class="col-md-6 col-lg-4">
+              <div class="card feature-card h-100"><div class="card-body">
+                <span class="avatar bg-orange-lt mb-3"><i class="ti ti-progress"></i></span>
+                <h3 class="card-title mb-1">Progress bar</h3>
+                <p class="text-secondary mb-0">Drawn with box-drawing characters at 1/8-cell precision, with elapsed and total time.</p>
+              </div></div>
+            </div>
+            <div class="col-md-6 col-lg-4">
+              <div class="card feature-card h-100"><div class="card-body">
+                <span class="avatar bg-purple-lt mb-3"><i class="ti ti-keyboard"></i></span>
+                <h3 class="card-title mb-1">Keyboard controls</h3>
+                <p class="text-secondary mb-0">Seek by 10 seconds, 1 minute or 10 minutes, jump to any tenth of the video, pause and change the volume.</p>
+              </div></div>
+            </div>
+            <div class="col-md-6 col-lg-4">
+              <div class="card feature-card h-100"><div class="card-body">
+                <span class="avatar bg-cyan-lt mb-3"><i class="ti ti-arrows-maximize"></i></span>
+                <h3 class="card-title mb-1">Adaptive size</h3>
+                <p class="text-secondary mb-0">The picture fits the terminal and keeps its aspect ratio, even when you resize the window mid-movie.</p>
+              </div></div>
+            </div>
+            <div class="col-md-6 col-lg-4">
+              <div class="card feature-card h-100"><div class="card-body">
+                <span class="avatar bg-red-lt mb-3"><i class="ti ti-bolt"></i></span>
+                <h3 class="card-title mb-1">Vectorized with NumPy</h3>
+                <p class="text-secondary mb-0">Each frame is turned into ANSI escape codes with array operations, with no per-character Python loop.</p>
+              </div></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Install -->
+        <section id="install" class="mb-5">
+          <div class="mb-3">
+            <h2 class="section-title mb-1">Install</h2>
+            <div class="text-secondary">Python 3.10+ and a terminal with 24-bit color support (Windows Terminal, iTerm2, most modern Linux terminals).</div>
+          </div>
+          <div class="row row-cards">
+            <div class="col-lg-7">
+              <div class="card h-100">
+                <div class="card-header">
+                  <ul class="nav nav-tabs card-header-tabs" data-bs-toggle="tabs" role="tablist">
+                    <li class="nav-item" role="presentation"><a href="#tab-win" class="nav-link active" data-bs-toggle="tab" role="tab" aria-selected="true"><i class="ti ti-brand-windows me-2"></i>Windows / macOS</a></li>
+                    <li class="nav-item" role="presentation"><a href="#tab-linux" class="nav-link" data-bs-toggle="tab" role="tab" aria-selected="false" tabindex="-1"><i class="ti ti-brand-ubuntu me-2"></i>Linux</a></li>
+                  </ul>
+                </div>
+                <div class="card-body">
+                  <div class="tab-content">
+                    <div class="tab-pane active show" id="tab-win" role="tabpanel">
+                      <p class="text-secondary">Clone the repository and install the dependencies.</p>
+                      <div class="code-block mb-0"><pre><code>git clone https://github.com/exnc/VideoToASCII.git
+cd VideoToASCII
+pip install -r requirements.txt</code></pre></div>
+                    </div>
+                    <div class="tab-pane" id="tab-linux" role="tabpanel">
+                      <p class="text-secondary">
+                        Recent Debian, Ubuntu and WSL systems block <code>pip install</code> into the system Python
+                        (<a href="https://peps.python.org/pep-0668/" target="_blank" rel="noopener">PEP 668</a>), so use a virtual environment.
+                      </p>
+                      <div class="code-block mb-3"><pre><code>sudo apt install python3-venv libportaudio2
+git clone https://github.com/exnc/VideoToASCII.git
+cd VideoToASCII
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt</code></pre></div>
+                      <div class="text-secondary small">
+                        Run <code>source .venv/bin/activate</code> again in each new terminal.
+                        <code>libportaudio2</code> is needed for sound; without it, the video plays silently.
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="col-lg-5">
+              <div class="card h-100">
+                <div class="card-header"><h3 class="card-title">Dependencies</h3></div>
+                <div class="table-responsive">
+                  <table class="table table-vcenter card-table">
+                    <thead><tr><th>Package</th><th>Purpose</th><th></th></tr></thead>
+                    <tbody>
+                      <tr><td><code>numpy</code></td><td class="text-secondary">Frame processing and ANSI encoding</td><td><span class="badge bg-blue-lt">required</span></td></tr>
+                      <tr><td><code>opencv-python</code></td><td class="text-secondary">Video decoding</td><td><span class="badge bg-blue-lt">required</span></td></tr>
+                      <tr><td><code>av</code></td><td class="text-secondary">Audio decoding</td><td><span class="badge bg-secondary-lt">optional</span></td></tr>
+                      <tr><td><code>sounddevice</code></td><td class="text-secondary">Audio output</td><td><span class="badge bg-secondary-lt">optional</span></td></tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div class="card-footer text-secondary small">Without <code>av</code> and <code>sounddevice</code>, the video plays without sound.</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Usage -->
+        <section id="usage" class="mb-5">
+          <div class="mb-3">
+            <h2 class="section-title mb-1">Usage</h2>
+            <div class="text-secondary">Pass the path of any video file that FFmpeg can read (MP4, MKV, WebM, AVI, ...).</div>
+          </div>
+          <div class="row row-cards">
+            <div class="col-12">
+              <div class="card">
+                <div class="card-header"><h3 class="card-title">Examples</h3></div>
+                <div class="card-body">
+                  <div class="code-block"><pre><code><span class="c"># Play a video</span>
+python video_ascii.py movie.mkv
+
+<span class="c"># "+" characters only</span>
+python video_ascii.py movie.mkv --chars "+"
+
+<span class="c"># Smaller, looping, half volume</span>
+python video_ascii.py clip.mp4 --width 120 --loop --volume 50</code></pre></div>
+                </div>
+              </div>
+            </div>
+            <div class="col-12">
+              <div class="card">
+                <div class="card-header"><h3 class="card-title">Options</h3></div>
+                <div class="table-responsive">
+                  <table class="table table-vcenter card-table">
+                    <thead><tr><th>Option</th><th>Description</th></tr></thead>
+                    <tbody>
+                      <tr><td><code>--chars "+"</code></td><td class="text-secondary">Characters from darkest to brightest (default <code> .:-=+*#%@</code>). A single character gives a uniform look.</td></tr>
+                      <tr><td><code>--width N</code></td><td class="text-secondary">Maximum width in columns (cannot exceed the terminal width).</td></tr>
+                      <tr><td><code>--loop</code></td><td class="text-secondary">Loop playback.</td></tr>
+                      <tr><td><code>--quant N</code></td><td class="text-secondary">Color quantization step: higher means less output and a smoother frame rate (default <code>4</code>, <code>1</code> = none).</td></tr>
+                      <tr><td><code>--boost X</code></td><td class="text-secondary">Color brightness multiplier.</td></tr>
+                      <tr><td><code>--volume N</code></td><td class="text-secondary">Initial volume in % (0-200, default <code>100</code>).</td></tr>
+                      <tr><td><code>--mute</code></td><td class="text-secondary">Start muted.</td></tr>
+                      <tr><td><code>--no-audio</code></td><td class="text-secondary">Do not play sound.</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Controls -->
+        <section id="controls" class="mb-5">
+          <div class="mb-3">
+            <h2 class="section-title mb-1">Controls</h2>
+            <div class="text-secondary">Keys work while the video is playing or paused.</div>
+          </div>
+          <div class="row row-cards">
+            <div class="col-md-6">
+              <div class="card h-100">
+                <div class="card-header"><h3 class="card-title"><i class="ti ti-player-track-next me-2 text-secondary"></i>Navigation</h3></div>
+                <table class="table table-vcenter card-table">
+                  <tbody>
+                    <tr><td class="key-cell w-1"><kbd>←</kbd><kbd>→</kbd></td><td class="text-secondary">Back / forward 10 seconds</td></tr>
+                    <tr><td class="key-cell"><kbd>↑</kbd><kbd>↓</kbd></td><td class="text-secondary">Forward / back 1 minute</td></tr>
+                    <tr><td class="key-cell"><kbd>PgUp</kbd><kbd>PgDn</kbd></td><td class="text-secondary">Forward / back 10 minutes</td></tr>
+                    <tr><td class="key-cell"><kbd>Home</kbd><kbd>End</kbd></td><td class="text-secondary">Start / end of the video</td></tr>
+                    <tr><td class="key-cell"><kbd>0</kbd> – <kbd>9</kbd></td><td class="text-secondary">Jump to 0%, 10%, … 90%</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div class="col-md-6">
+              <div class="card h-100">
+                <div class="card-header"><h3 class="card-title"><i class="ti ti-player-play me-2 text-secondary"></i>Playback</h3></div>
+                <table class="table table-vcenter card-table">
+                  <tbody>
+                    <tr><td class="key-cell w-1"><kbd>Space</kbd></td><td class="text-secondary">Pause / resume</td></tr>
+                    <tr><td class="key-cell"><kbd>+</kbd><kbd>-</kbd></td><td class="text-secondary">Volume up / down</td></tr>
+                    <tr><td class="key-cell"><kbd>m</kbd></td><td class="text-secondary">Mute / unmute</td></tr>
+                    <tr><td class="key-cell"><kbd>q</kbd><kbd>Esc</kbd></td><td class="text-secondary">Quit</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Tips -->
+        <section id="tips" class="mb-4">
+          <div class="mb-3">
+            <h2 class="section-title mb-1">Tips</h2>
+          </div>
+          <div class="row row-cards">
+            <div class="col-md-6">
+              <div class="card h-100"><div class="card-body d-flex gap-3">
+                <span class="avatar bg-azure-lt flex-shrink-0"><i class="ti ti-zoom-in"></i></span>
+                <div>
+                  <h3 class="card-title mb-1">Higher resolution</h3>
+                  <p class="text-secondary mb-0">
+                    Each character is one terminal cell, so detail is limited by the number of columns and lines.
+                    Make the font smaller (<kbd>Ctrl</kbd> + <kbd>-</kbd> in Windows Terminal) or go full screen (<kbd>F11</kbd>).
+                    <kbd>Ctrl</kbd> + <kbd>0</kbd> resets the scaling.
+                  </p>
+                </div>
+              </div></div>
+            </div>
+            <div class="col-md-6">
+              <div class="card h-100"><div class="card-body d-flex gap-3">
+                <span class="avatar bg-yellow-lt flex-shrink-0"><i class="ti ti-gauge"></i></span>
+                <div>
+                  <h3 class="card-title mb-1">Choppy playback</h3>
+                  <p class="text-secondary mb-0">
+                    A larger picture means more text for the terminal to draw.
+                    Try <code>--quant 8</code> or a smaller <code>--width</code>.
+                  </p>
+                </div>
+              </div></div>
+            </div>
+          </div>
+        </section>
+
+      </div>
+    </div>
+
+    <footer class="footer footer-transparent d-print-none">
+      <div class="container-xl">
+        <div class="row text-center align-items-center flex-row-reverse">
+          <div class="col-lg-auto ms-lg-auto">
+            <a href="https://github.com/exnc/VideoToASCII" class="link-secondary" target="_blank" rel="noopener"><i class="ti ti-brand-github me-1"></i>Source code</a>
+          </div>
+          <div class="col-12 col-lg-auto mt-3 mt-lg-0 text-secondary">
+            VideoToASCII · AI-generated demo · Built with <a href="https://tabler.io" class="link-secondary" target="_blank" rel="noopener">Tabler</a>
+          </div>
+        </div>
+      </div>
+    </footer>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/js/tabler.min.js" defer></script>
+<script>
+  // Theme toggle
+  (function () {
+    var root = document.documentElement;
+    var btn = document.getElementById("theme-toggle");
+    function sync() {
+      var dark = root.getAttribute("data-bs-theme") === "dark";
+      btn.querySelector(".theme-icon-light").style.display = dark ? "" : "none";
+      btn.querySelector(".theme-icon-dark").style.display = dark ? "none" : "";
+    }
+    btn.addEventListener("click", function () {
+      var next = root.getAttribute("data-bs-theme") === "dark" ? "light" : "dark";
+      root.setAttribute("data-bs-theme", next);
+      try { localStorage.setItem("vta-theme", next); } catch (e) {}
+      sync();
+    });
+    sync();
+  })();
+
+  // Copy buttons on code blocks
+  document.querySelectorAll(".code-block").forEach(function (block) {
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn btn-sm btn-icon btn-ghost-secondary btn-copy";
+    btn.title = "Copy";
+    btn.setAttribute("aria-label", "Copy to clipboard");
+    btn.innerHTML = '<i class="ti ti-copy"></i>';
+    btn.addEventListener("click", function () {
+      var text = block.querySelector("code").innerText
+        .split("\n").filter(function (l) { return !/^\s*#/.test(l) && l.trim(); }).join("\n");
+      navigator.clipboard.writeText(text).then(function () {
+        btn.innerHTML = '<i class="ti ti-check text-green"></i>';
+        setTimeout(function () { btn.innerHTML = '<i class="ti ti-copy"></i>'; }, 1500);
+      });
+    });
+    block.appendChild(btn);
+  });
+
+  // Animated ASCII plasma in the hero, rendered like the player does it.
+  (function () {
+    var el = document.getElementById("plasma");
+    var prog = document.getElementById("plasma-progress");
+    var timeEl = document.getElementById("plasma-time");
+    var RAMP = " .:-=+*#%@";
+    var COLS = 64, ROWS = 22, LOOP = 30;
+    var reduce = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    function frame(t) {
+      var html = "", lastColor = null, run = "";
+      for (var y = 0; y < ROWS; y++) {
+        for (var x = 0; x < COLS; x++) {
+          var u = x / COLS, v = y / ROWS;
+          var p = Math.sin(u * 9 + t) + Math.sin(v * 7 - t * 1.3)
+                + Math.sin((u + v) * 6 + t * .7) + Math.sin(Math.hypot(u - .5, v - .5) * 14 - t * 2);
+          var b = (p + 4) / 8;                                   // 0..1 brightness
+          var ch = RAMP[Math.min(RAMP.length - 1, Math.floor(b * RAMP.length))];
+          var r = 128 + 127 * Math.sin(p * 1.6 + t * .5);
+          var g = 128 + 127 * Math.sin(p * 1.6 + 2.1 + t * .5);
+          var bl = 128 + 127 * Math.sin(p * 1.6 + 4.2 + t * .5);
+          var k = .35 + .65 * b;
+          var color = "rgb(" + (r * k | 0) + "," + (g * k | 0) + "," + (bl * k | 0) + ")";
+          // Quantize to merge runs of similar color into one span.
+          color = color.replace(/\d+/g, function (n) { return (n >> 4) << 4; });
+          if (color !== lastColor) {
+            if (run) html += '<span style="color:' + lastColor + '">' + run + "</span>";
+            run = ""; lastColor = color;
+          }
+          run += ch;
+        }
+        run += "\n";
+      }
+      html += '<span style="color:' + lastColor + '">' + run + "</span>";
+      el.innerHTML = html;
+      var s = t % LOOP;
+      prog.style.width = (s / LOOP * 100) + "%";
+      timeEl.textContent = "00:" + String(Math.floor(s)).padStart(2, "0");
+    }
+
+    if (reduce) { frame(1.5); document.getElementById("plasma-icon").textContent = "❚❚"; return; }
+    var start = performance.now(), last = 0;
+    function loop(now) {
+      if (now - last > 50) { frame((now - start) / 1000); last = now; }
+      requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
+  })();
+</script>
+</body>
+</html>
